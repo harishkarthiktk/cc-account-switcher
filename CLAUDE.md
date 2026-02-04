@@ -13,23 +13,32 @@ This is a Bash-based multi-account switcher for Claude Code that manages authent
 The script (`ccswitch.sh`) manages Claude Code accounts by storing and swapping authentication data:
 
 **Storage Strategy:**
-- macOS: Credentials stored in system Keychain, OAuth configs in `~/.claude-switch-backup/configs/`
-- Linux/WSL: Both credentials and OAuth configs in `~/.claude-switch-backup/` with 600 permissions
+- **macOS**: Credentials stored in system Keychain, OAuth configs in `~/.claude-switch-backup/configs/`
+- **Linux**: Credentials stored in libsecret (system keyring), OAuth configs in `~/.claude-switch-backup/configs/`
+- **WSL**: Credentials encrypted with Windows DPAPI in `%USERPROFILE%\.claude-switch\`, OAuth configs in `~/.claude-switch-backup/configs/`
 - All account metadata tracked in `~/.claude-switch-backup/sequence.json`
 
 **Key Components:**
 - **Platform detection** (lines 37-50): Detects macOS, Linux, WSL, and container environments
-- **Credential management** (lines 191-268): Platform-specific read/write operations for credentials
-- **Config management** (lines 270-292): Handles OAuth account data from `~/.claude/.claude.json`
-- **Account switching** (lines 614-680): Backup current account, restore target account, update active state
-- **Sequence tracking** (lines 294-327): Maintains ordered list of accounts for rotation
+- **Credential management** (lines 249-461): Platform-specific secure read/write operations for credentials
+  - macOS: Uses system Keychain via `security` command
+  - Linux: Uses libsecret via `secret-tool` command
+  - WSL: Uses Windows DPAPI via PowerShell encryption
+- **Config management** (lines 488-510): Handles OAuth account data from `~/.claude/.claude.json`
+- **Credential deletion** (lines 464-486): Platform-specific credential cleanup functions
+- **Account switching** (lines 731-808): Backup current account, restore target account, update active state
+- **Sequence tracking** (lines 512-560): Maintains ordered list of accounts for rotation
 
 ### Critical File Paths
 
 The script works with these Claude Code files:
 - Primary config: `~/.claude/.claude.json` (preferred, contains oauthAccount structure)
 - Fallback config: `~/.claude.json`
-- Credentials: macOS Keychain or `~/.claude/.credentials.json` (Linux/WSL)
+- Backup directory: `~/.claude-switch-backup/` (configs only, credentials in platform-specific secure storage)
+- Credentials storage:
+  - macOS: System Keychain (service: "Claude Code-credentials", etc.)
+  - Linux: libsecret system keyring (service: "claude-code")
+  - WSL: Windows user profile `%USERPROFILE%\.claude-switch\` (encrypted files)
 
 ### Account Data Structure
 
@@ -73,16 +82,30 @@ The script works with these Claude Code files:
 
 - Bash 4.4+ (checked via `check_bash_version` function)
 - `jq` for JSON processing
-- Platform-specific: `security` command on macOS for Keychain access
+- **macOS**: `security` command (built-in) for Keychain access
+- **Linux**: `secret-tool` (from libsecret package) for system keyring access
+  - Debian/Ubuntu: `sudo apt install libsecret-tools`
+  - RHEL/Fedora: `sudo yum install libsecret-tools`
+- **WSL**: `powershell.exe` (built-in, should be accessible via /mnt/c/)
 
 ## Important Implementation Notes
 
 ### Security Considerations
 
-- All credential files created with 600 permissions (owner read/write only)
-- Backup directory created with 700 permissions (owner only)
+**Platform-Specific Security:**
+- **macOS**: Credentials stored in system Keychain with user-only access
+- **Linux**: Credentials stored in system keyring via libsecret, encrypted at rest by the keyring service (GNOME Keyring, KWallet, etc.). Credentials protected by user login password
+- **WSL**: Credentials encrypted using Windows Data Protection API (DPAPI), tied to Windows user account. Files stored in `%USERPROFILE%\.claude-switch\` are useless without the user's Windows login context
+
+**File Permissions:**
+- OAuth config files created with 600 permissions (owner read/write only)
+- Backup directories created with 700 permissions (owner only)
+- No plaintext credential files on disk for Linux/WSL platforms
+
+**General:**
 - Never run as root outside containers (checked in main function)
 - Credentials never written to logs or stdout
+- All credential deletion functions properly clean up sensitive data
 
 ### JSON Handling
 

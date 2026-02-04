@@ -7,7 +7,10 @@ A simple tool to manage and switch between multiple Claude Code accounts on macO
 - **Multi-account management**: Add, remove, and list Claude Code accounts
 - **Quick switching**: Switch between accounts with simple commands
 - **Cross-platform**: Works on macOS, Linux, and WSL
-- **Secure storage**: Uses system keychain (macOS) or protected files (Linux/WSL)
+- **Secure storage**:
+  - macOS: System Keychain encryption
+  - Linux: System keyring via libsecret (GNOME Keyring, KWallet, etc.)
+  - WSL: Windows DPAPI encryption (user-specific, tied to Windows login)
 - **Settings preservation**: Only switches authentication - your themes, settings, and preferences remain unchanged
 
 ## Installation
@@ -59,6 +62,8 @@ chmod +x ccswitch.sh
 
 - Bash 4.4+
 - `jq` (JSON processor)
+- **Linux**: `libsecret-tools` (for system keyring access)
+- **WSL**: PowerShell (included with Windows, requires `/mnt/c` access)
 
 ### Installing Dependencies
 
@@ -71,21 +76,43 @@ brew install jq
 **Ubuntu/Debian:**
 
 ```bash
-sudo apt install jq
+sudo apt install jq libsecret-tools
 ```
+
+**RHEL/Fedora:**
+
+```bash
+sudo yum install jq libsecret-tools
+```
+
+**WSL:**
+
+- `jq` via your Linux distribution (see above)
+- PowerShell access from WSL (verify with: `powershell.exe -NoProfile -Command "Write-Host 'OK'"`)
+- Ensure Windows filesystem is accessible (`/mnt/c/` should be mounted)
 
 ## How It Works
 
-The switcher stores account authentication data separately:
+The switcher stores account authentication data using platform-specific secure storage:
 
-- **macOS**: Credentials in Keychain, OAuth info in `~/.claude-switch-backup/`
-- **Linux/WSL**: Both credentials and OAuth info in `~/.claude-switch-backup/` with restricted permissions
+**Credential Storage:**
+- **macOS**: Credentials stored in system Keychain (encrypted by macOS)
+- **Linux**: Credentials stored in system keyring via libsecret (encrypted by GNOME Keyring, KWallet, or other keyring services)
+- **WSL**: Credentials encrypted with Windows DPAPI and stored in `%USERPROFILE%\.claude-switch\`
 
-When switching accounts, it:
+**OAuth Config:** All platforms store OAuth config files in `~/.claude-switch-backup/configs/` with 600 permissions
 
-1. Backs up the current account's authentication data
-2. Restores the target account's authentication data
-3. Updates Claude Code's authentication files
+**When switching accounts, the script:**
+
+1. Backs up the current account's authentication data to secure storage
+2. Restores the target account's authentication data from secure storage
+3. Updates Claude Code's active configuration files
+
+**Security guarantees:**
+- No plaintext credential files on disk
+- Credentials encrypted at rest on Linux and WSL
+- MacOS credentials protected by Keychain system
+- All storage automatically locked when user logs out
 
 ## Troubleshooting
 
@@ -118,9 +145,20 @@ Your current Claude Code login will remain active.
 
 ## Security Notes
 
-- Credentials stored in macOS Keychain or files with 600 permissions
-- Authentication files are stored with restricted permissions (600)
-- The tool requires Claude Code to be closed during account switches
+**Credential Encryption:**
+- **macOS**: Credentials protected by system Keychain encryption
+- **Linux**: Credentials stored in system keyring (GNOME Keyring, KWallet, etc.) with keyring-level encryption
+- **WSL**: Credentials encrypted with Windows DPAPI (user account specific)
+
+**File Permissions:**
+- OAuth config files stored with 600 permissions (owner read/write only)
+- Backup directories created with 700 permissions (owner only)
+- No plaintext credentials on disk
+
+**Operation Safety:**
+- The tool requires Claude Code to be closed during account switches to avoid conflicts
+- Credentials are never exposed in logs or terminal output
+- All sensitive operations handled through secure platform APIs
 
 ## License
 

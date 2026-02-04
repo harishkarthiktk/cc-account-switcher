@@ -139,6 +139,10 @@ check_bash_version() {
 
 # Check dependencies
 check_dependencies() {
+    local platform
+    platform=$(detect_platform)
+
+    # Common dependencies
     for cmd in jq; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             echo "Error: Required command '$cmd' not found"
@@ -146,13 +150,41 @@ check_dependencies() {
             exit 1
         fi
     done
+
+    # Linux-specific: libsecret required
+    if [[ "$platform" == "linux" ]]; then
+        if ! command -v secret-tool >/dev/null 2>&1; then
+            echo "Error: secret-tool not found (required for Linux)"
+            echo "Install with: sudo apt install libsecret-tools"
+            echo "Or: sudo yum install libsecret-tools"
+            exit 1
+        fi
+    fi
+
+    # WSL-specific: PowerShell required (should be available by default)
+    if [[ "$platform" == "wsl" ]]; then
+        if ! command -v powershell.exe >/dev/null 2>&1; then
+            echo "Error: PowerShell not accessible from WSL"
+            echo "Ensure Windows is properly configured and /mnt/c is mounted"
+            exit 1
+        fi
+    fi
 }
 
 # Setup backup directories
 setup_directories() {
-    mkdir -p "$BACKUP_DIR"/{configs,credentials}
+    local platform
+    platform=$(detect_platform)
+
+    mkdir -p "$BACKUP_DIR/configs"
     chmod 700 "$BACKUP_DIR"
-    chmod 700 "$BACKUP_DIR"/{configs,credentials}
+    chmod 700 "$BACKUP_DIR/configs"
+
+    # Only create credentials directory for macOS (not used on Linux/WSL anymore)
+    if [[ "$platform" == "macos" ]]; then
+        mkdir -p "$BACKUP_DIR/credentials"
+        chmod 700 "$BACKUP_DIR/credentials"
+    fi
 }
 
 # Claude Code process detection (Node.js app)
@@ -214,18 +246,29 @@ get_current_account() {
     echo "${email:-none}"
 }
 
-# Linux credential read implementation
+# Linux credential read implementation (using libsecret)
 linux_read_credentials() {
-    if [[ -f "$HOME/.claude/.credentials.json" ]]; then
-        cat "$HOME/.claude/.credentials.json"
-    else
-        echo ""
-    fi
+    secret-tool lookup service "claude-code" type "active-credentials" 2>/dev/null || echo ""
 }
 
-# WSL credential read hook (delegates to Linux implementation)
+# WSL credential read implementation (using Windows DPAPI)
 wsl_read_credentials() {
-    linux_read_credentials
+    local cred_file='$env:USERPROFILE\.claude-switch\active-credentials.txt'
+
+    powershell.exe -NoProfile -Command "
+        if (Test-Path '$cred_file') {
+            try {
+                \$secure = Get-Content '$cred_file' | ConvertTo-SecureString -ErrorAction Stop
+                \$bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR(\$secure)
+                [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(\$bstr)
+            } catch {
+                Write-Error 'Failed to decrypt credentials'
+                exit 1
+            }
+        } else {
+            ''
+        }
+    " 2>/dev/null || echo ""
 }
 
 # Read credentials based on platform
@@ -246,18 +289,41 @@ read_credentials() {
     esac
 }
 
-# Linux credential write implementation
+# Linux credential write implementation (using libsecret)
 linux_write_credentials() {
     local credentials="$1"
-    mkdir -p "$HOME/.claude"
-    printf '%s' "$credentials" > "$HOME/.claude/.credentials.json"
-    chmod 600 "$HOME/.claude/.credentials.json"
+    printf '%s' "$credentials" | secret-tool store \
+        --label="Claude Code Active Credentials" \
+        service "claude-code" \
+        type "active-credentials" || {
+        echo "Error: Failed to store credentials in secret service"
+        exit 1
+    }
 }
 
-# WSL credential write hook (delegates to Linux implementation)
+# WSL credential write implementation (using Windows DPAPI)
 wsl_write_credentials() {
     local credentials="$1"
-    linux_write_credentials "$credentials"
+
+    # Ensure directory exists in Windows profile
+    powershell.exe -NoProfile -Command "
+        \$dir = Join-Path \$env:USERPROFILE '.claude-switch'
+        if (-not (Test-Path \$dir)) {
+            New-Item -ItemType Directory -Path \$dir -Force | Out-Null
+        }
+    " || {
+        echo "Error: Failed to create credential directory in Windows"
+        exit 1
+    }
+
+    # Store encrypted credential
+    local cred_file='$env:USERPROFILE\.claude-switch\active-credentials.txt'
+    printf '%s' "$credentials" | powershell.exe -NoProfile -Command "
+        \$input | ConvertTo-SecureString -AsPlainText -Force | ConvertFrom-SecureString | Out-File -FilePath '$cred_file' -Encoding UTF8
+    " || {
+        echo "Error: Failed to store credentials in Windows"
+        exit 1
+    }
 }
 
 # Write credentials based on platform
@@ -279,23 +345,36 @@ write_credentials() {
     esac
 }
 
-# Linux account credential read implementation
+# Linux account credential read implementation (using libsecret)
 linux_read_account_credentials() {
     local account_num="$1"
     local email="$2"
-    local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-    if [[ -f "$cred_file" ]]; then
-        cat "$cred_file"
-    else
-        echo ""
-    fi
+    secret-tool lookup \
+        service "claude-code" \
+        account "$account_num" \
+        email "$email" 2>/dev/null || echo ""
 }
 
-# WSL account credential read hook (delegates to Linux implementation)
+# WSL account credential read implementation (using Windows DPAPI)
 wsl_read_account_credentials() {
     local account_num="$1"
     local email="$2"
-    linux_read_account_credentials "$account_num" "$email"
+    local safe_email="${email//[@.]/-}"  # Sanitize email for filename
+    local cred_file='$env:USERPROFILE\.claude-switch\account-'${account_num}'-'${safe_email}'.txt'
+
+    powershell.exe -NoProfile -Command "
+        if (Test-Path '$cred_file') {
+            try {
+                \$secure = Get-Content '$cred_file' | ConvertTo-SecureString -ErrorAction Stop
+                \$bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR(\$secure)
+                [System.Runtime.InteropServices.Marshal]::PtrToStringAuto(\$bstr)
+            } catch {
+                ''
+            }
+        } else {
+            ''
+        }
+    " 2>/dev/null || echo ""
 }
 
 # Read account credentials from backup
@@ -318,22 +397,47 @@ read_account_credentials() {
     esac
 }
 
-# Linux account credential write implementation
+# Linux account credential write implementation (using libsecret)
 linux_write_account_credentials() {
     local account_num="$1"
     local email="$2"
     local credentials="$3"
-    local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-    printf '%s' "$credentials" > "$cred_file"
-    chmod 600 "$cred_file"
+    printf '%s' "$credentials" | secret-tool store \
+        --label="Claude Code Account $account_num ($email)" \
+        service "claude-code" \
+        account "$account_num" \
+        email "$email" || {
+        echo "Error: Failed to store account credentials in secret service"
+        exit 1
+    }
 }
 
-# WSL account credential write hook (delegates to Linux implementation)
+# WSL account credential write implementation (using Windows DPAPI)
 wsl_write_account_credentials() {
     local account_num="$1"
     local email="$2"
     local credentials="$3"
-    linux_write_account_credentials "$account_num" "$email" "$credentials"
+    local safe_email="${email//[@.]/-}"  # Sanitize email for filename
+
+    # Ensure directory exists
+    powershell.exe -NoProfile -Command "
+        \$dir = Join-Path \$env:USERPROFILE '.claude-switch'
+        if (-not (Test-Path \$dir)) {
+            New-Item -ItemType Directory -Path \$dir -Force | Out-Null
+        }
+    " || {
+        echo "Error: Failed to create credential directory"
+        exit 1
+    }
+
+    # Store encrypted credential
+    local cred_file='$env:USERPROFILE\.claude-switch\account-'${account_num}'-'${safe_email}'.txt'
+    printf '%s' "$credentials" | powershell.exe -NoProfile -Command "
+        \$input | ConvertTo-SecureString -AsPlainText -Force | ConvertFrom-SecureString | Out-File -FilePath '$cred_file' -Encoding UTF8
+    " || {
+        echo "Error: Failed to store account credentials"
+        exit 1
+    }
 }
 
 # Write account credentials to backup
@@ -355,6 +459,30 @@ write_account_credentials() {
             wsl_write_account_credentials "$account_num" "$email" "$credentials"
             ;;
     esac
+}
+
+# Delete Linux credentials from libsecret
+linux_delete_account_credentials() {
+    local account_num="$1"
+    local email="$2"
+    secret-tool clear \
+        service "claude-code" \
+        account "$account_num" \
+        email "$email" 2>/dev/null || true
+}
+
+# Delete WSL credentials from Windows
+wsl_delete_account_credentials() {
+    local account_num="$1"
+    local email="$2"
+    local safe_email="${email//[@.]/-}"
+    local cred_file='$env:USERPROFILE\.claude-switch\account-'${account_num}'-'${safe_email}'.txt'
+
+    powershell.exe -NoProfile -Command "
+        if (Test-Path '$cred_file') {
+            Remove-Item -Path '$cred_file' -Force
+        }
+    " 2>/dev/null || true
 }
 
 # Read account config from backup
@@ -540,10 +668,10 @@ cmd_remove_account() {
             security delete-generic-password -s "Claude Code-Account-${account_num}-${email}" 2>/dev/null || true
             ;;
         linux)
-            rm -f "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
+            linux_delete_account_credentials "$account_num" "$email"
             ;;
         wsl)
-            rm -f "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
+            wsl_delete_account_credentials "$account_num" "$email"
             ;;
     esac
     rm -f "$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
