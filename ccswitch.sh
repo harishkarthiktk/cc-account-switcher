@@ -122,13 +122,18 @@ write_json() {
     chmod 600 "$file"
 }
 
-# Check Bash version (4.4+ required)
+# Check Bash version (4.4+ recommended)
 check_bash_version() {
     local version
     version=$(bash --version | head -n1 | grep -oE '[0-9]+\.[0-9]+' | head -n1)
     if ! awk -v ver="$version" 'BEGIN { exit (ver >= 4.4 ? 0 : 1) }'; then
-        echo "Error: Bash 4.4+ required (found $version)"
-        exit 1
+        echo "Warning: Bash 4.4+ recommended (found $version)"
+        echo "This script may work with earlier versions, but compatibility is not guaranteed."
+        echo -n "Continue anyway? [y/N] "
+        read -r response
+        if [[ "$response" != "y" && "$response" != "Y" ]]; then
+            exit 0
+        fi
     fi
 }
 
@@ -209,23 +214,50 @@ get_current_account() {
     echo "${email:-none}"
 }
 
+# Linux credential read implementation
+linux_read_credentials() {
+    if [[ -f "$HOME/.claude/.credentials.json" ]]; then
+        cat "$HOME/.claude/.credentials.json"
+    else
+        echo ""
+    fi
+}
+
+# WSL credential read hook (delegates to Linux implementation)
+wsl_read_credentials() {
+    linux_read_credentials
+}
+
 # Read credentials based on platform
 read_credentials() {
     local platform
     platform=$(detect_platform)
-    
+
     case "$platform" in
         macos)
             security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo ""
             ;;
-        linux|wsl)
-            if [[ -f "$HOME/.claude/.credentials.json" ]]; then
-                cat "$HOME/.claude/.credentials.json"
-            else
-                echo ""
-            fi
+        linux)
+            linux_read_credentials
+            ;;
+        wsl)
+            wsl_read_credentials
             ;;
     esac
+}
+
+# Linux credential write implementation
+linux_write_credentials() {
+    local credentials="$1"
+    mkdir -p "$HOME/.claude"
+    printf '%s' "$credentials" > "$HOME/.claude/.credentials.json"
+    chmod 600 "$HOME/.claude/.credentials.json"
+}
+
+# WSL credential write hook (delegates to Linux implementation)
+wsl_write_credentials() {
+    local credentials="$1"
+    linux_write_credentials "$credentials"
 }
 
 # Write credentials based on platform
@@ -233,17 +265,37 @@ write_credentials() {
     local credentials="$1"
     local platform
     platform=$(detect_platform)
-    
+
     case "$platform" in
         macos)
             security add-generic-password -U -s "Claude Code-credentials" -a "$USER" -w "$credentials" 2>/dev/null
             ;;
-        linux|wsl)
-            mkdir -p "$HOME/.claude"
-            printf '%s' "$credentials" > "$HOME/.claude/.credentials.json"
-            chmod 600 "$HOME/.claude/.credentials.json"
+        linux)
+            linux_write_credentials "$credentials"
+            ;;
+        wsl)
+            wsl_write_credentials "$credentials"
             ;;
     esac
+}
+
+# Linux account credential read implementation
+linux_read_account_credentials() {
+    local account_num="$1"
+    local email="$2"
+    local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
+    if [[ -f "$cred_file" ]]; then
+        cat "$cred_file"
+    else
+        echo ""
+    fi
+}
+
+# WSL account credential read hook (delegates to Linux implementation)
+wsl_read_account_credentials() {
+    local account_num="$1"
+    local email="$2"
+    linux_read_account_credentials "$account_num" "$email"
 }
 
 # Read account credentials from backup
@@ -252,20 +304,36 @@ read_account_credentials() {
     local email="$2"
     local platform
     platform=$(detect_platform)
-    
+
     case "$platform" in
         macos)
             security find-generic-password -s "Claude Code-Account-${account_num}-${email}" -w 2>/dev/null || echo ""
             ;;
-        linux|wsl)
-            local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-            if [[ -f "$cred_file" ]]; then
-                cat "$cred_file"
-            else
-                echo ""
-            fi
+        linux)
+            linux_read_account_credentials "$account_num" "$email"
+            ;;
+        wsl)
+            wsl_read_account_credentials "$account_num" "$email"
             ;;
     esac
+}
+
+# Linux account credential write implementation
+linux_write_account_credentials() {
+    local account_num="$1"
+    local email="$2"
+    local credentials="$3"
+    local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
+    printf '%s' "$credentials" > "$cred_file"
+    chmod 600 "$cred_file"
+}
+
+# WSL account credential write hook (delegates to Linux implementation)
+wsl_write_account_credentials() {
+    local account_num="$1"
+    local email="$2"
+    local credentials="$3"
+    linux_write_account_credentials "$account_num" "$email" "$credentials"
 }
 
 # Write account credentials to backup
@@ -275,15 +343,16 @@ write_account_credentials() {
     local credentials="$3"
     local platform
     platform=$(detect_platform)
-    
+
     case "$platform" in
         macos)
             security add-generic-password -U -s "Claude Code-Account-${account_num}-${email}" -a "$USER" -w "$credentials" 2>/dev/null
             ;;
-        linux|wsl)
-            local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-            printf '%s' "$credentials" > "$cred_file"
-            chmod 600 "$cred_file"
+        linux)
+            linux_write_account_credentials "$account_num" "$email" "$credentials"
+            ;;
+        wsl)
+            wsl_write_account_credentials "$account_num" "$email" "$credentials"
             ;;
     esac
 }
@@ -470,7 +539,10 @@ cmd_remove_account() {
         macos)
             security delete-generic-password -s "Claude Code-Account-${account_num}-${email}" 2>/dev/null || true
             ;;
-        linux|wsl)
+        linux)
+            rm -f "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
+            ;;
+        wsl)
             rm -f "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
             ;;
     esac
