@@ -160,15 +160,36 @@ wait_for_claude_close() {
     if ! is_claude_running; then
         return 0
     fi
-    
-    echo "Claude Code is running. Please close it first."
-    echo "Waiting for Claude Code to close..."
-    
+
+    # Display informative header with visual separator
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Claude Code is currently running"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    echo "To safely switch accounts and avoid credential conflicts,"
+    echo "all Claude Code instances must be closed first."
+    echo ""
+    echo "This script will wait here until you close all instances."
+    echo "Once closed, the account switch will automatically proceed."
+    echo ""
+    echo "Please close all Claude Code windows now..."
+    echo ""
+
+    # Animated waiting indicator
+    local spinner=( '⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏' )
+    local i=0
+
     while is_claude_running; do
-        sleep 1
+        printf "  Waiting for Claude Code to close... ${spinner[$((i % ${#spinner[@]}))]}\r"
+        i=$((i + 1))
+        sleep 0.5
     done
-    
-    echo "Claude Code closed. Continuing..."
+
+    # Clear the spinner line and show success
+    printf "\r%s\n" "  $(printf '%.0s ' {1..50})"
+    echo "  ✓ All Claude Code instances closed. Proceeding with account switch..."
+    echo ""
 }
 
 # Get current account info from .claude.json
@@ -545,8 +566,8 @@ cmd_switch() {
         echo "Please run './ccswitch.sh --switch' again to switch to the next account."
         exit 0
     fi
-    
-    # wait_for_claude_close
+
+    wait_for_claude_close
     
     local active_account sequence
     active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
@@ -606,8 +627,8 @@ cmd_switch_to() {
         echo "Error: Account-$target_account does not exist"
         exit 1
     fi
-    
-    # wait_for_claude_close
+
+    wait_for_claude_close
     perform_switch "$target_account"
 }
 
