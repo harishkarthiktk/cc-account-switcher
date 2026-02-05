@@ -743,6 +743,17 @@ cmd_list() {
 
 # Switch to next account
 cmd_switch() {
+    # Validate no arguments provided
+    if [[ $# -gt 0 ]]; then
+        echo "Error: --switch does not accept arguments"
+        echo "To switch to a specific account, use: $0 --switch-to <account_number|email>"
+        echo ""
+        echo "Examples:"
+        echo "  $0 --switch-to 1"
+        echo "  $0 --switch-to user@example.com"
+        exit 1
+    fi
+
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
         echo "Error: No accounts are managed yet"
         exit 1
@@ -945,7 +956,8 @@ main() {
             cmd_list
             ;;
         --switch)
-            cmd_switch
+            shift
+            cmd_switch "$@"
             ;;
         --switch-to)
             shift
