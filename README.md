@@ -47,6 +47,43 @@ chmod +x ccswitch.sh
 ./ccswitch.sh --help
 ```
 
+### Per-Account CLAUDE.md Setup
+
+Each Claude Code account can have its own `CLAUDE.md` project instructions. When you switch accounts, the `./CLAUDE.md` symlink automatically points to your account's file.
+
+**Prerequisites:**
+
+1. Create `~/.agent/` directory
+2. Create `CLAUDE_default.md` in `~/.agent/` (fallback if account-specific file missing)
+
+```bash
+mkdir -p ~/.agent/
+cp ./CLAUDE.md ~/.agent/CLAUDE_default.md  # Use your current CLAUDE.md as default
+```
+
+**Create per-account files:**
+
+Email addresses are sanitized by replacing `@` and `.` with `-`:
+
+```bash
+# Email: user@example.com → CLAUDE_user-example-com.md
+cp ~/.agent/CLAUDE_default.md ~/.agent/CLAUDE_user-example-com.md
+# Edit with account-specific settings
+```
+
+**Sync commands:**
+
+```bash
+# Switch accounts (automatically updates ./CLAUDE.md)
+./ccswitch.sh --switch
+./ccswitch.sh --switch-to 2
+
+# Manually sync after editing ~/.agent/ files
+./ccswitch.sh --sync-claude
+```
+
+Verify with: `ls -la CLAUDE.md`
+
 ### First Time Setup
 
 1. **Log into Claude Code** with your first account (make sure you're actively logged in)

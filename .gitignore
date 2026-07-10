@@ -10,6 +10,7 @@ Thumbs.db
 *.log
 
 # Temporary files
+.rtk/
 *.tmp
 .temp/
 z_personal_stash/

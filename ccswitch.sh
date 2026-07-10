@@ -8,6 +8,7 @@ set -euo pipefail
 # Configuration
 readonly BACKUP_DIR="$HOME/.claude-switch-backup"
 readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
+readonly AGENT_DIR="$HOME/.agent"
 
 # Container detection
 is_running_in_container() {
@@ -185,6 +186,111 @@ setup_directories() {
         mkdir -p "$BACKUP_DIR/credentials"
         chmod 700 "$BACKUP_DIR/credentials"
     fi
+}
+
+# Sanitize an email for use in a filename (@ and . -> -)
+sanitize_email_for_filename() {
+    local email="$1"
+    echo "${email//[@.]/-}"
+}
+
+# Setup ~/.agent directory (idempotent)
+setup_agent_directory() {
+    mkdir -p "$AGENT_DIR"
+    chmod 700 "$AGENT_DIR"
+}
+
+# Resolve the CLAUDE.md path for a given account email, falling back to
+# CLAUDE_default.md if the account-specific file doesn't exist. Does NOT
+# warn - callers decide whether/when to surface a missing-file warning.
+get_account_claude_path() {
+    local email="$1"
+    local sanitized
+    sanitized=$(sanitize_email_for_filename "$email")
+    local account_file="$AGENT_DIR/CLAUDE_${sanitized}.md"
+    local default_file="$AGENT_DIR/CLAUDE_default.md"
+
+    if [[ -f "$account_file" ]]; then
+        echo "$account_file"
+    else
+        echo "$default_file"
+    fi
+}
+
+# Path of the CLAUDE.md symlink to manage - always the current working
+# directory, deliberately NOT git-root-detected.
+get_symlink_path() {
+    echo "$(pwd)/CLAUDE.md"
+}
+
+# Create/replace the ./CLAUDE.md symlink to point at the active account's
+# CLAUDE.md file in ~/.agent/.
+#   $1 = email
+#   $2 = "quiet" (default) or "verbose" - controls whether warnings/success
+#        messages are printed. Automatic switches use "quiet"; --sync-claude
+#        uses "verbose".
+# If a plain (non-symlink) CLAUDE.md already exists at the target path, it
+# is backed up to CLAUDE.md.bak (never overwritten silently) before the
+# symlink is created - unless a .bak already exists, in which case the sync
+# is refused so we never clobber a prior backup.
+# Returns 0 on success, 1 on any failure. Never calls exit.
+sync_claude_symlink() {
+    local email="$1"
+    local mode="${2:-quiet}"
+
+    local symlink_path target_dir
+    symlink_path=$(get_symlink_path)
+    target_dir=$(dirname "$symlink_path")
+
+    if [[ ! -w "$target_dir" ]]; then
+        [[ "$mode" == "verbose" ]] && echo "Warning: Cannot update CLAUDE.md symlink - '$target_dir' is not writable"
+        return 1
+    fi
+
+    # If an existing plain file (not a symlink) sits at the target, back it
+    # up rather than silently destroying it.
+    if [[ -e "$symlink_path" && ! -L "$symlink_path" ]]; then
+        local backup_path="${symlink_path}.bak"
+        if [[ -e "$backup_path" ]]; then
+            [[ "$mode" == "verbose" ]] && echo "Warning: $symlink_path is a plain file and $backup_path already exists - refusing to overwrite. Resolve manually."
+            return 1
+        fi
+        mv "$symlink_path" "$backup_path"
+        [[ "$mode" == "verbose" ]] && echo "Backed up existing $symlink_path -> $backup_path"
+    fi
+
+    local claude_path
+    claude_path=$(get_account_claude_path "$email")
+
+    if [[ ! -f "$claude_path" ]]; then
+        if [[ "$mode" == "verbose" ]]; then
+            echo "Warning: No CLAUDE.md found for '$email' and no default exists."
+            echo "  Create one of the following files:"
+            echo "    $AGENT_DIR/CLAUDE_$(sanitize_email_for_filename "$email").md"
+            echo "    $AGENT_DIR/CLAUDE_default.md"
+        fi
+        return 1
+    fi
+
+    # Atomic replace: create the symlink at a temp path in the same
+    # directory, then rename over the real path (rename is atomic on the
+    # same filesystem on both macOS and Linux).
+    local temp_link="${symlink_path}.tmp.$$"
+
+    if ! ln -sfn "$claude_path" "$temp_link" 2>/dev/null; then
+        [[ "$mode" == "verbose" ]] && echo "Warning: Failed to create CLAUDE.md symlink"
+        rm -f "$temp_link" 2>/dev/null || true
+        return 1
+    fi
+
+    if ! mv -f "$temp_link" "$symlink_path" 2>/dev/null; then
+        [[ "$mode" == "verbose" ]] && echo "Warning: Failed to activate CLAUDE.md symlink"
+        rm -f "$temp_link" 2>/dev/null || true
+        return 1
+    fi
+
+    [[ "$mode" == "verbose" ]] && echo "Synced ./CLAUDE.md -> $claude_path"
+    return 0
 }
 
 # Claude Code process detection (Node.js app)
@@ -547,6 +653,7 @@ account_exists() {
 # Add account
 cmd_add_account() {
     setup_directories
+    setup_agent_directory
     init_sequence_file
     
     local current_email
@@ -597,8 +704,12 @@ cmd_add_account() {
     ' "$SEQUENCE_FILE")
     
     write_json "$SEQUENCE_FILE" "$updated_sequence"
-    
+
     echo "Added Account $account_num: $current_email"
+    echo ""
+    echo "To use a custom CLAUDE.md for this account, create:"
+    echo "  $AGENT_DIR/CLAUDE_$(sanitize_email_for_filename "$current_email").md"
+    echo "(Falls back to $AGENT_DIR/CLAUDE_default.md if not created.)"
 }
 
 # Remove account
@@ -741,8 +852,27 @@ cmd_list() {
     ' "$SEQUENCE_FILE"
 }
 
+# Manually sync the ./CLAUDE.md symlink for the currently active account
+cmd_sync_claude() {
+    local current_email
+    current_email=$(get_current_account)
+
+    if [[ "$current_email" == "none" ]]; then
+        echo "Error: No active Claude account found. Please log in first."
+        exit 1
+    fi
+
+    setup_agent_directory
+
+    if sync_claude_symlink "$current_email" "verbose"; then
+        exit 0
+    else
+        exit 1
+    fi
+}
+
 # Switch to next account
-cmd_switch() {
+cmd_sync() {
     # Validate no arguments provided
     if [[ $# -gt 0 ]]; then
         echo "Error: --switch does not accept arguments"
@@ -901,7 +1031,11 @@ perform_switch() {
     ' "$SEQUENCE_FILE")
     
     write_json "$SEQUENCE_FILE" "$updated_sequence"
-    
+
+    # Sync ./CLAUDE.md symlink for the new active account (best-effort,
+    # silent - a missing CLAUDE.md must never block a switch)
+    sync_claude_symlink "$target_email" "quiet" || true
+
     echo "Switched to Account-$target_account ($target_email)"
     # Display updated account list
     cmd_list
@@ -922,6 +1056,7 @@ show_usage() {
     echo "  --list                           List all managed accounts"
     echo "  --switch                         Rotate to next account in sequence"
     echo "  --switch-to <num|email>          Switch to specific account number or email"
+    echo "  --sync-claude                    Sync ./CLAUDE.md symlink to the active account"
     echo "  --help                           Show this help message"
     echo ""
     echo "Examples:"
@@ -931,6 +1066,14 @@ show_usage() {
     echo "  $0 --switch-to 2"
     echo "  $0 --switch-to user@example.com"
     echo "  $0 --remove-account user@example.com"
+    echo "  $0 --sync-claude"
+    echo ""
+    echo "Per-account CLAUDE.md files:"
+    echo "  Place account-specific instructions in ~/.agent/CLAUDE_<sanitized-email>.md"
+    echo "  (e.g. user@example.com -> ~/.agent/CLAUDE_user-example-com.md)"
+    echo "  A ~/.agent/CLAUDE_default.md file is used as a fallback."
+    echo "  ./CLAUDE.md in your current directory is symlinked to the active account's file"
+    echo "  automatically on --switch/--switch-to, or manually via --sync-claude."
 }
 
 # Main script logic
@@ -962,6 +1105,9 @@ main() {
         --switch-to)
             shift
             cmd_switch_to "$@"
+            ;;
+        --sync-claude)
+            cmd_sync_claude
             ;;
         --help)
             show_usage
